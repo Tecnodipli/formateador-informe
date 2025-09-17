@@ -2,10 +2,10 @@ import os
 import io
 import re
 import logging
-import requests
 from io import BytesIO
 from typing import Optional
 
+import requests
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -15,22 +15,47 @@ from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.enum.section import WD_SECTION
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-
 from openai import OpenAI
+from PIL import Image
 
-# ---------- Config ----------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s — %(levelname)s — %(message)s')
 logger = logging.getLogger(__name__)
 
 REPORT_COLOR   = RGBColor(133, 78, 197)
 HEADING_COLOR  = RGBColor(85, 54, 185)
 
-# Imágenes locales (sin dependencias externas)
-DEFAULT_PORTADA_PATH       = "assets/portada.png"
-DEFAULT_CONTRAPORTADA_PATH = "assets/contraportada.png"
-DEFAULT_LOGO_PATH          = "assets/logo.png"
+ASSETS_DIR = "assets"
+DEFAULT_PORTADA_PATH       = os.path.join(ASSETS_DIR, "portada.png")
+DEFAULT_CONTRAPORTADA_PATH = os.path.join(ASSETS_DIR, "contraportada.png")
+DEFAULT_LOGO_PATH          = os.path.join(ASSETS_DIR, "logo.png")
 
-# ---------- FastAPI ----------
+def ensure_default_assets() -> None:
+    """Crea la carpeta assets y genera imágenes PNG por defecto si no existen."""
+    try:
+        os.makedirs(ASSETS_DIR, exist_ok=True)
+        
+        if not os.path.exists(DEFAULT_PORTADA_PATH):
+            img = Image.new("RGB", (1200, 1600), (133, 78, 197))
+            img.save(DEFAULT_PORTADA_PATH, format="PNG")
+            
+        if not os.path.exists(DEFAULT_CONTRAPORTADA_PATH):
+            img = Image.new("RGB", (1200, 1600), (85, 54, 185))
+            img.save(DEFAULT_CONTRAPORTADA_PATH, format="PNG")
+            
+        if not os.path.exists(DEFAULT_LOGO_PATH):
+            img = Image.new("RGB", (600, 600), (255, 255, 255))
+            try:
+                from PIL import ImageDraw
+                draw = ImageDraw.Draw(img)
+                draw.ellipse((100, 100, 500, 500), fill=(133, 78, 197))
+            except Exception:
+                pass
+            img.save(DEFAULT_LOGO_PATH, format="PNG")
+    except Exception as e:
+        logger.warning(f"No se pudieron preparar assets por defecto: {e}")
+
+ensure_default_assets()
+
 app = FastAPI(title="Generador de Informe DOCX", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -40,7 +65,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- Token helpers: try tiktoken, else fallback ----------
 USE_TIKTOKEN = False
 MODEL_MAX_TOKENS = 8192
 
@@ -56,18 +80,15 @@ def trim_to_fit(text: str, reserved_output: int = 700) -> str:
     if USE_TIKTOKEN:
         tokens = ENCODING.encode(text)
         max_input = max(MODEL_MAX_TOKENS - reserved_output - 100, 0)
-        return ENCODING.decode(tokens[:max_input])
-    # Fallback aprox: ~4 chars por token
+        return ENCODING.decode(tokens[: max_input if max_input > 0 else 0])
     approx_chars_per_token = 4
     max_input_tokens = max(MODEL_MAX_TOKENS - reserved_output - 100, 0)
     return text[: max_input_tokens * approx_chars_per_token]
 
-# ---------- OpenAI ----------
 def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) -> str:
     if not api_key:
         raise ValueError("API Key de OpenAI es requerida")
     client = OpenAI(api_key=api_key)
-
     trimmed_input = trim_to_fit(user_input, reserved_output=max_tokens)
 
     def try_model(model_name: str) -> str:
@@ -78,7 +99,7 @@ def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) 
                 {"role": "user", "content": trimmed_input},
             ],
             temperature=0.5,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
         )
         return resp.choices[0].message.content.strip()
 
@@ -86,16 +107,15 @@ def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) 
         return try_model("gpt-4o-mini")
     except Exception as e:
         msg = str(e)
-        logger.error(f"❌ Error GPT: {msg}")
+        logger.error(f"Error GPT: {msg}")
         if "insufficient_quota" in msg or "429" in msg or "Rate limit" in msg:
             try:
                 return try_model("gpt-3.5-turbo")
             except Exception as fallback_err:
-                logger.error("❌ Fallback también falló: %s", fallback_err)
+                logger.error("Fallback también falló: %s", fallback_err)
                 return "Contenido no disponible."
         return "Contenido no disponible."
 
-# ---------- Prompts ----------
 PROMPT_RESUMEN = """
 Actúa como un experto en redacción ejecutiva y análisis de informes cualitativos. Tu tarea es redactar un resumen ejecutivo profesional y conciso, basándote en el siguiente contenido del informe.
 
@@ -128,10 +148,9 @@ Actúa como un experto en redacción ejecutiva y análisis cualitativo. A partir
 * Referencias APA: para cada hallazgo, incluye al final una referencia estilo APA basada en el texto original (ej. Autor, Año, p. X).
 """
 
-# ---------- DOCX helpers ----------
 def modify_style(doc: Document, style_name: str, size_pt: int,
-                 bold: bool=False, italic: bool=False,
-                 color: Optional[RGBColor]=None) -> None:
+                 bold: bool = False, italic: bool = False,
+                 color: Optional[RGBColor] = None) -> None:
     font = doc.styles[style_name].font
     font.name = "Century Gothic"
     font.size = Pt(size_pt)
@@ -146,13 +165,12 @@ def insert_cover_page(doc_out: Document, portada_path) -> None:
         'top': sec0.top_margin,
         'bottom': sec0.bottom_margin,
         'left': sec0.left_margin,
-        'right': sec0.right_margin
+        'right': sec0.right_margin,
     }
     sec0.top_margin = sec0.bottom_margin = Cm(0)
     sec0.left_margin = sec0.right_margin = Cm(0)
 
     pw, ph = sec0.page_width, sec0.page_height
-
     try:
         if isinstance(portada_path, list):
             img_url = portada_path[0]
@@ -181,7 +199,7 @@ def insert_contraportada_body(doc_out: Document, contraportada_path) -> None:
         'top': last_sec.top_margin,
         'bottom': last_sec.bottom_margin,
         'left': last_sec.left_margin,
-        'right': last_sec.right_margin
+        'right': last_sec.right_margin,
     }
 
     cover_sec = doc_out.add_section(WD_SECTION.NEW_PAGE)
@@ -214,7 +232,6 @@ def insert_footer_logo(doc: Document, logo_source) -> None:
     footer = sec.footer
     p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-
     try:
         if isinstance(logo_source, str):
             resp = requests.get(logo_source, timeout=15)
@@ -262,7 +279,6 @@ def format_text(p, texto, color=RGBColor(133, 78, 197)):
         else:
             p.add_run(token)
 
-# ---------- Núcleo ----------
 def generate_report(api_key: str,
                     input_doc_bytes: bytes,
                     portada_bytes: Optional[bytes],
@@ -274,7 +290,6 @@ def generate_report(api_key: str,
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     full_text  = "\n\n".join(paragraphs)
 
-    # Selección de recursos (cambio principal: imágenes locales)
     if use_defaults:
         with open(DEFAULT_PORTADA_PATH, "rb") as f:
             portada_path = BytesIO(f.read())
@@ -354,7 +369,6 @@ def generate_report(api_key: str,
     out_bytes.seek(0)
     return out_bytes.getvalue()
 
-# ---------- Endpoints ----------
 @app.post("/generate-report")
 async def generate_report_endpoint(
     file: UploadFile = File(..., description="Archivo .docx base"),
@@ -428,7 +442,6 @@ async def generate_report_simple_endpoint(
         headers={"Content-Disposition": f'attachment; filename="{final_name}"'}
     )
 
-# ---------- Health ----------
 @app.get("/")
 async def root():
     return {"message": "API de Generador de Informes DOCX funcionando", "version": "1.0.0"}
