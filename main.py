@@ -25,9 +25,10 @@ logger = logging.getLogger(__name__)
 REPORT_COLOR   = RGBColor(133, 78, 197)
 HEADING_COLOR  = RGBColor(85, 54, 185)
 
-DEFAULT_PORTADA_URL       = "https://i.ibb.co/Z1VYvyNf/8.png"
-DEFAULT_CONTRAPORTADA_URL = "https://i.ibb.co/PzQjnM3t/9.png"
-DEFAULT_LOGO_URL          = "https://i.ibb.co/r26Y7jZb/67a3c9a636deaac6875d60aa-fulllogo-transparent-nobuffer-1.png"
+# Imágenes locales (sin dependencias externas)
+DEFAULT_PORTADA_PATH       = "assets/portada.png"
+DEFAULT_CONTRAPORTADA_PATH = "assets/contraportada.png"
+DEFAULT_LOGO_PATH          = "assets/logo.png"
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Generador de Informe DOCX", version="1.0.0")
@@ -273,10 +274,14 @@ def generate_report(api_key: str,
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     full_text  = "\n\n".join(paragraphs)
 
+    # Selección de recursos (cambio principal: imágenes locales)
     if use_defaults:
-        portada_path       = [DEFAULT_PORTADA_URL]
-        contraportada_path = DEFAULT_CONTRAPORTADA_URL
-        logo_path          = DEFAULT_LOGO_URL
+        with open(DEFAULT_PORTADA_PATH, "rb") as f:
+            portada_path = BytesIO(f.read())
+        with open(DEFAULT_CONTRAPORTADA_PATH, "rb") as f:
+            contraportada_path = BytesIO(f.read())
+        with open(DEFAULT_LOGO_PATH, "rb") as f:
+            logo_path = BytesIO(f.read())
     else:
         if not (portada_bytes and contraportada_bytes and logo_bytes):
             raise ValueError("Faltan imágenes personalizadas (portada/contraportada/logo).")
