@@ -167,7 +167,7 @@ Actúa como un experto en redacción ejecutiva y análisis de informes cualitati
 * Contenido: objetivo, alcance, hallazgos, impacto y recomendaciones.
 * Tono: formal, claro y accesible.
 * Evitar: repeticiones, tecnicismos y explicaciones extensas.
-* Referencias Internas: incluye citas del texto original como "Según el informe... (p. X)".
+
 """
 
 PROMPT_ABSTRACT = """
@@ -187,7 +187,6 @@ Actúa como un experto en redacción ejecutiva y análisis cualitativo. A partir
 * Estructura: numeración y contexto breve por punto.
 * Estilo: profesional, claro, útil para tomadores de decisiones.
 * Evitar: recomendaciones, juicios, generalidades o conclusiones.
-* Referencias APA: para cada hallazgo, incluye al final una referencia estilo APA basada en el texto original (ej. Autor, Año, p. X).
 """
 
 # =========================
@@ -507,3 +506,4 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
+
