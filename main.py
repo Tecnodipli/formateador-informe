@@ -4,9 +4,11 @@ import re
 import logging
 from io import BytesIO
 from typing import Optional
+from datetime import datetime, timedelta
+import secrets
 
 import requests
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from docx import Document
@@ -28,6 +30,12 @@ ASSETS_DIR = "assets"
 DEFAULT_PORTADA_PATH       = os.path.join(ASSETS_DIR, "portada.png")
 DEFAULT_CONTRAPORTADA_PATH = os.path.join(ASSETS_DIR, "contraportada.png")
 DEFAULT_LOGO_PATH          = os.path.join(ASSETS_DIR, "logo.png")
+
+# Descargas temporales en memoria
+DOWNLOADS: dict[str, tuple[bytes, str, str, datetime]] = {}
+DOWNLOAD_TTL_SECS = 900  # 15 minutos
+
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 def ensure_default_assets() -> None:
     """Crea la carpeta assets y genera imágenes PNG por defecto si no existen."""
@@ -53,6 +61,19 @@ def ensure_default_assets() -> None:
             img.save(DEFAULT_LOGO_PATH, format="PNG")
     except Exception as e:
         logger.warning(f"No se pudieron preparar assets por defecto: {e}")
+
+def cleanup_downloads() -> None:
+    now = datetime.utcnow()
+    expired = [t for t, (_, _, _, exp) in DOWNLOADS.items() if exp <= now]
+    for t in expired:
+        DOWNLOADS.pop(t, None)
+
+def register_download(data: bytes, filename: str, media_type: str) -> str:
+    cleanup_downloads()
+    token = secrets.token_urlsafe(16)
+    expires_at = datetime.utcnow() + timedelta(seconds=DOWNLOAD_TTL_SECS)
+    DOWNLOADS[token] = (data, filename, media_type, expires_at)
+    return token
 
 ensure_default_assets()
 
@@ -369,6 +390,7 @@ def generate_report(api_key: str,
     out_bytes.seek(0)
     return out_bytes.getvalue()
 
+# ---------- Endpoints ----------
 @app.post("/generate-report")
 async def generate_report_endpoint(
     file: UploadFile = File(..., description="Archivo .docx base"),
@@ -441,6 +463,82 @@ async def generate_report_simple_endpoint(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{final_name}"'}
     )
+
+@app.post("/generate-report-link")
+async def generate_report_link(
+    request: Request,
+    file: UploadFile = File(..., description="Archivo .docx base"),
+    openai_api_key: str = Form(..., description="Tu OpenAI API Key"),
+    usar_personalizadas: bool = Form(False),
+    portada: UploadFile | None = File(None),
+    contraportada: UploadFile | None = File(None),
+    logo: UploadFile | None = File(None),
+):
+    if not openai_api_key:
+        raise HTTPException(status_code=400, detail="openai_api_key es requerida")
+    if not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
+
+    base_bytes = await file.read()
+    portada_bytes = await portada.read() if (portada and usar_personalizadas) else None
+    contraportada_bytes = await contraportada.read() if (contraportada and usar_personalizadas) else None
+    logo_bytes = await logo.read() if (logo and usar_personalizadas) else None
+
+    result_bytes = generate_report(
+        api_key=openai_api_key,
+        input_doc_bytes=base_bytes,
+        portada_bytes=portada_bytes,
+        contraportada_bytes=contraportada_bytes,
+        logo_bytes=logo_bytes,
+        use_defaults=not usar_personalizadas,
+        filename_hint=file.filename,
+    )
+
+    final_name = file.filename.replace(".docx", "") + "_INFORME_FINAL.docx"
+    token = register_download(result_bytes, final_name, DOCX_MEDIA_TYPE)
+    download_url = str(request.base_url) + f"download/{token}"
+    return {"download_url": download_url, "expires_in_seconds": DOWNLOAD_TTL_SECS}
+
+@app.post("/generate-report-simple-link")
+async def generate_report_simple_link(
+    request: Request,
+    file: UploadFile = File(..., description="Archivo .docx base"),
+    openai_api_key: str = Form(..., description="Tu OpenAI API Key"),
+):
+    if not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
+
+    base_bytes = await file.read()
+    result_bytes = generate_report(
+        api_key=openai_api_key,
+        input_doc_bytes=base_bytes,
+        portada_bytes=None,
+        contraportada_bytes=None,
+        logo_bytes=None,
+        use_defaults=True,
+        filename_hint=file.filename,
+    )
+
+    final_name = file.filename.replace(".docx", "") + "_INFORME_FINAL.docx"
+    token = register_download(result_bytes, final_name, DOCX_MEDIA_TYPE)
+    download_url = str(request.base_url) + f"download/{token}"
+    return {"download_url": download_url, "expires_in_seconds": DOWNLOAD_TTL_SECS}
+
+@app.get("/download/{token}")
+def download_token(token: str):
+    cleanup_downloads()
+    item = DOWNLOADS.get(token)
+    if not item:
+        raise HTTPException(status_code=404, detail="Link expirado o inválido")
+    data, filename, media_type, exp = item
+    if exp <= datetime.utcnow():
+        DOWNLOADS.pop(token, None)
+        raise HTTPException(status_code=410, detail="Link expirado")
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(io.BytesIO(data), media_type=media_type, headers=headers)
 
 @app.get("/")
 async def root():
