@@ -4,7 +4,7 @@ import re
 import logging
 import requests
 from io import BytesIO
-from typing import Optional, List
+from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +16,6 @@ from docx.enum.section import WD_SECTION
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-import tiktoken
 from openai import OpenAI
 
 # ---------- Config ----------
@@ -32,28 +31,42 @@ DEFAULT_LOGO_URL          = "https://i.ibb.co/r26Y7jZb/67a3c9a636deaac6875d60aa-
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Generador de Informe DOCX", version="1.0.0")
-
-# CORS (ajusta orígenes para Wix si hace falta)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cambia a tu dominio de Wix si lo prefieres
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- GPT Helpers ----------
-ENCODING = tiktoken.encoding_for_model("gpt-4")
+# ---------- Token helpers: try tiktoken, else fallback ----------
+USE_TIKTOKEN = False
 MODEL_MAX_TOKENS = 8192
 
-def trim_to_fit(text: str, reserved_output: int = 700) -> str:
-    tokens = ENCODING.encode(text)
-    return ENCODING.decode(tokens[:MODEL_MAX_TOKENS - reserved_output - 100])
+try:
+    import tiktoken
+    ENCODING = tiktoken.encoding_for_model("gpt-4")
+    USE_TIKTOKEN = True
+    logger.info("tiktoken disponible: recorte por tokens activo.")
+except Exception:
+    logger.warning("tiktoken no disponible: usando recorte aproximado por caracteres.")
 
+def trim_to_fit(text: str, reserved_output: int = 700) -> str:
+    if USE_TIKTOKEN:
+        tokens = ENCODING.encode(text)
+        max_input = max(MODEL_MAX_TOKENS - reserved_output - 100, 0)
+        return ENCODING.decode(tokens[:max_input])
+    # Fallback aprox: ~4 chars por token
+    approx_chars_per_token = 4
+    max_input_tokens = max(MODEL_MAX_TOKENS - reserved_output - 100, 0)
+    return text[: max_input_tokens * approx_chars_per_token]
+
+# ---------- OpenAI ----------
 def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) -> str:
     if not api_key:
         raise ValueError("API Key de OpenAI es requerida")
     client = OpenAI(api_key=api_key)
+
     trimmed_input = trim_to_fit(user_input, reserved_output=max_tokens)
 
     def try_model(model_name: str) -> str:
@@ -74,7 +87,6 @@ def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) 
         msg = str(e)
         logger.error(f"❌ Error GPT: {msg}")
         if "insufficient_quota" in msg or "429" in msg or "Rate limit" in msg:
-            logger.warning("⚠️ Reintentando con gpt-3.5-turbo...")
             try:
                 return try_model("gpt-3.5-turbo")
             except Exception as fallback_err:
@@ -92,6 +104,7 @@ Actúa como un experto en redacción ejecutiva y análisis de informes cualitati
 * Contenido: objetivo, alcance, hallazgos, impacto y recomendaciones.
 * Tono: formal, claro y accesible.
 * Evitar: repeticiones, tecnicismos y explicaciones extensas.
+* Referencias Internas: incluye citas del texto original como "Según el informe... (p. X)".
 """
 
 PROMPT_ABSTRACT = """
@@ -114,7 +127,7 @@ Actúa como un experto en redacción ejecutiva y análisis cualitativo. A partir
 * Referencias APA: para cada hallazgo, incluye al final una referencia estilo APA basada en el texto original (ej. Autor, Año, p. X).
 """
 
-# ---------- DOCX Helpers (mismos nombres/funciones) ----------
+# ---------- DOCX helpers ----------
 def modify_style(doc: Document, style_name: str, size_pt: int,
                  bold: bool=False, italic: bool=False,
                  color: Optional[RGBColor]=None) -> None:
@@ -248,7 +261,7 @@ def format_text(p, texto, color=RGBColor(133, 78, 197)):
         else:
             p.add_run(token)
 
-# ---------- Core generation (misma lógica) ----------
+# ---------- Núcleo ----------
 def generate_report(api_key: str,
                     input_doc_bytes: bytes,
                     portada_bytes: Optional[bytes],
@@ -256,12 +269,10 @@ def generate_report(api_key: str,
                     logo_bytes: Optional[bytes],
                     use_defaults: bool,
                     filename_hint: str) -> bytes:
-    # Cargar documento base
     doc = Document(BytesIO(input_doc_bytes))
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     full_text  = "\n\n".join(paragraphs)
 
-    # Selección de recursos
     if use_defaults:
         portada_path       = [DEFAULT_PORTADA_URL]
         contraportada_path = DEFAULT_CONTRAPORTADA_URL
@@ -273,7 +284,6 @@ def generate_report(api_key: str,
         contraportada_path = BytesIO(contraportada_bytes)
         logo_path          = BytesIO(logo_bytes)
 
-    # Generación
     doc_out = Document()
     insert_cover_page(doc_out, portada_path)
 
@@ -334,8 +344,6 @@ def generate_report(api_key: str,
 
     insert_footer_logo(doc_out, logo_path)
 
-    # Guardar en memoria
-    final_name = (filename_hint or "document").replace(".docx", "") + "_INFORME_FINAL.docx"
     out_bytes = io.BytesIO()
     doc_out.save(out_bytes)
     out_bytes.seek(0)
@@ -353,13 +361,11 @@ async def generate_report_endpoint(
 ):
     if not openai_api_key:
         raise HTTPException(status_code=400, detail="openai_api_key es requerida")
-
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
 
     try:
         base_bytes = await file.read()
-
         portada_bytes = await portada.read() if (portada and usar_personalizadas) else None
         contraportada_bytes = await contraportada.read() if (contraportada and usar_personalizadas) else None
         logo_bytes = await logo.read() if (logo and usar_personalizadas) else None
@@ -386,7 +392,6 @@ async def generate_report_endpoint(
         headers={"Content-Disposition": f'attachment; filename="{final_name}"'}
     )
 
-# Endpoint simple (usa imágenes por defecto, evita 422 si no subes archivos extra)
 @app.post("/generate-report-simple")
 async def generate_report_simple_endpoint(
     file: UploadFile = File(..., description="Archivo .docx base"),
@@ -394,7 +399,6 @@ async def generate_report_simple_endpoint(
 ):
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
-
     try:
         base_bytes = await file.read()
         result_bytes = generate_report(
@@ -419,7 +423,7 @@ async def generate_report_simple_endpoint(
         headers={"Content-Disposition": f'attachment; filename="{final_name}"'}
     )
 
-# ---------- Health checks ----------
+# ---------- Health ----------
 @app.get("/")
 async def root():
     return {"message": "API de Generador de Informes DOCX funcionando", "version": "1.0.0"}
