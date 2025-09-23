@@ -45,7 +45,8 @@ ALLOWED_ORIGINS = [
     "https://dipli.ai",
     "https://isagarcivill09.wixsite.com/turop",
     "https://isagarcivill09.wixsite.com/turop/tienda",
-    "https://isagarcivill09-wixsite-com.filesusr.com"
+    "https://isagarcivill09-wixsite-com.filesusr.com",
+    "https://www.dipli.ai/preparaci%C3%B3n"
 ]
 
 app = FastAPI(title="Generador de Informe DOCX", version="1.0.0")
@@ -506,6 +507,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
+
 
 
 
