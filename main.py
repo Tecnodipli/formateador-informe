@@ -46,13 +46,14 @@ ALLOWED_ORIGINS = [
     "https://isagarcivill09.wixsite.com/turop",
     "https://isagarcivill09.wixsite.com/turop/tienda",
     "https://isagarcivill09-wixsite-com.filesusr.com",
-    "https://www.dipli.ai/preparaci%C3%B3n"
+    "https://www.dipli.ai/preparaci%C3%B3n",
+    "https://www-dipli-ai.filesusr.com"
 ]
 
 app = FastAPI(title="Generador de Informe DOCX", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS,   # ✅ ahora sí aplica tu lista
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -507,6 +508,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
+
 
 
 
