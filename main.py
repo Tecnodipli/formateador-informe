@@ -1,4 +1,5 @@
-import os
+
+          import os
 import io
 import re
 import logging
@@ -40,7 +41,7 @@ DEFAULT_LOGO_PATH          = os.path.join(ASSETS_DIR, "logo.png")
 app = FastAPI(title="Formateador de informes")
 
 # =========================
-# CORS: habilitar solo tus dominios
+# CORS
 # =========================
 ALLOWED_ORIGINS = [
     "https://www.dipli.ai",
@@ -65,18 +66,16 @@ app.add_middleware(
 # Descargas temporales en memoria
 # =========================
 DOWNLOADS: dict[str, tuple[bytes, str, str, datetime]] = {}
-DOWNLOAD_TTL_SECS = 900  # 15 minutos
+DOWNLOAD_TTL_SECS = 900  # 15 min
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 def cleanup_downloads() -> None:
-    """Elimina descargas expiradas de memoria"""
     now = datetime.utcnow()
     expired = [t for t, (_, _, _, exp) in DOWNLOADS.items() if exp <= now]
     for t in expired:
         DOWNLOADS.pop(t, None)
 
 def register_download(data: bytes, filename: str, media_type: str) -> str:
-    """Guarda un archivo en memoria y devuelve un token único"""
     cleanup_downloads()
     token = secrets.token_urlsafe(16)
     expires_at = datetime.utcnow() + timedelta(seconds=DOWNLOAD_TTL_SECS)
@@ -84,7 +83,6 @@ def register_download(data: bytes, filename: str, media_type: str) -> str:
     return token
 
 def ensure_default_assets() -> None:
-    """Crea imágenes predeterminadas si no existen"""
     try:
         os.makedirs(ASSETS_DIR, exist_ok=True)
         if not os.path.exists(DEFAULT_PORTADA_PATH):
@@ -115,9 +113,9 @@ try:
     import tiktoken
     ENCODING = tiktoken.encoding_for_model("gpt-4")
     USE_TIKTOKEN = True
-    logger.info("tiktoken disponible: recorte por tokens activo.")
+    logger.info("tiktoken disponible.")
 except Exception:
-    logger.warning("tiktoken no disponible: usando recorte aproximado por caracteres.")
+    logger.warning("tiktoken no disponible: recorte aproximado por caracteres.")
 
 def trim_to_fit(text: str, reserved_output: int = 700) -> str:
     if USE_TIKTOKEN:
@@ -151,7 +149,7 @@ def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) 
     except Exception as e:
         msg = str(e)
         logger.error(f"Error GPT: {msg}")
-        if "insufficient_quota" in msg or "429" in msg or "Rate limit" in msg:
+        if any(x in msg for x in ("insufficient_quota", "429", "Rate limit")):
             try:
                 return try_model("gpt-3.5-turbo")
             except Exception as fallback_err:
@@ -184,7 +182,7 @@ Actúa como un experto en redacción ejecutiva y análisis cualitativo. A partir
 """
 
 # =========================
-# Funciones de formato DOCX
+# Formateo
 # =========================
 def modify_style(doc: Document, style_name: str, size_pt: int,
                  bold: bool = False, italic: bool = False,
@@ -239,7 +237,6 @@ def insert_contraportada_body(doc_out: Document, contraportada_path) -> None:
         'left': last_sec.left_margin,
         'right': last_sec.right_margin,
     }
-
     cover_sec = doc_out.add_section(WD_SECTION.NEW_PAGE)
     cover_sec.top_margin = cover_sec.bottom_margin = Cm(0)
     cover_sec.left_margin = cover_sec.right_margin = Cm(0)
@@ -300,20 +297,10 @@ def extract_title5_text(line: str) -> str:
     m = re.search(r"\*\*(.*?)\*\*", line)
     return m.group(1).strip(": ") if m else ""
 
-# ========= NUEVO: formateo con verbatim centrado y separado =========
+# ========= NUEVO: verbatim centrado con saltos =========
 def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -> None:
-    """
-    Emite el 'texto' en el documento:
-    - Texto normal: en el mismo párrafo (justificado).
-    - **negritas**: negrita en línea.
-    - _itálica_: itálica en línea.
-    - *negrita+itálica*: negrita+itálica en línea con color.
-    - _"verbatim"_ : inserta línea en blanco antes, párrafo centrado en morado + itálica + negrita con el contenido,
-      y línea en blanco después. Luego continúa en un nuevo párrafo justificado.
-    """
-    # Captura también el patrón _" ... "_ como token independiente
     tokens = re.split(r'(\*\*[^*]+\*\*|_[^_]+_|[*][^*]+[*]|_"[^"]+"_)', texto)
-    p = None  # párrafo actual (Normal, justificado)
+    p = None
 
     def ensure_p():
         nonlocal p
@@ -323,69 +310,78 @@ def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -
         return p
 
     for token in tokens:
-        if token is None or token == "":
+        if not token:
             continue
-
-        # Verbatim: _" ... "_
         if token.startswith('_"') and token.endswith('"_'):
-            # Línea en blanco antes
-            doc.add_paragraph("")
-            # Párrafo centrado con el contenido del verbatim
+            doc.add_paragraph("")  # línea en blanco antes
             vp = doc.add_paragraph("", style="Normal")
             vp.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
             run = vp.add_run(token[2:-2])
             run.bold = True
             run.italic = True
             run.font.color.rgb = color
-            # Línea en blanco después
-            doc.add_paragraph("")
-            # Reinicia el párrafo corriente para lo que siga
+            doc.add_paragraph("")  # línea en blanco después
             p = None
             continue
-
-        # **negrita**
         if token.startswith("**") and token.endswith("**"):
             run = ensure_p().add_run(token[2:-2])
             run.bold = True
             continue
-
-        # *negrita+itálica*  (y lo dejamos también con color como venías usando)
         if token.startswith("*") and token.endswith("*"):
             run = ensure_p().add_run(token[1:-1])
             run.bold = True
             run.italic = True
             run.font.color.rgb = color
             continue
-
-        # _itálica_
         if token.startswith("_") and token.endswith("_"):
             run = ensure_p().add_run(token[1:-1])
             run.italic = True
             continue
-
-        # Texto plano
         ensure_p().add_run(token)
 
 # ====== Helpers para evitar duplicados de títulos ======
+_NBSP = "\u00A0"
+_ZWSP = "\u200B"
+
+def _normalize_ws(s: str) -> str:
+    # Reemplaza NBSP y ZWSP por espacio normal y colapsa espacios
+    s = s.replace(_NBSP, " ").replace(_ZWSP, "")
+    return re.sub(r"\s+", " ", s, flags=re.UNICODE).strip()
+
 def _normalize_title(s: str) -> str:
-    """Normaliza el texto de un posible título para compararlo."""
-    s = s.strip()
-    s = re.sub(r"^[#\s]+", "", s)        # quita numerales al inicio
-    s = s.strip("*_ :\t")                # quita **, __, :, espacios
+    s = _normalize_ws(s)
+    s = re.sub(r"^[#\s]+", "", s, flags=re.UNICODE)  # quita # y espacios
+    s = s.strip("*_ :\t-—")  # limpieza ligera
     return s.lower()
 
 def _is_duplicate_section_title(texto: str) -> bool:
-    """
-    True si el párrafo es un título (con numerales o formateado)
-    que coincide con los que YA agregamos por código.
-    """
     norm = _normalize_title(texto)
-    return (
-        norm.startswith("resumen ejecutivo")
-        or norm.startswith("principales hallazgos")
-        # Agrega "abstract" aquí si quisieras filtrarlo en documentos viejos:
-        # or norm.startswith("abstract")
-    )
+    return norm.startswith("resumen ejecutivo") or norm.startswith("principales hallazgos")
+
+def __md_heading_info(s: str):
+    """
+    Detecta encabezados Markdown con cualquier espacio unicode.
+    Devuelve (level:int|None, title:str|None).
+    """
+    s2 = _normalize_ws(s)
+    m = re.match(r"^(#{1,6})\s*(.+?)\s*$", s2, flags=re.UNICODE)
+    if not m:
+        return None, None
+    level = len(m.group(1))
+    title = m.group(2)
+    return level, title
+
+def _strip_duplicate_heading_lines(text: str) -> str:
+    # Elimina líneas que sean exactamente el mismo título (con o sin ###)
+    lines = text.splitlines()
+    out = []
+    for ln in lines:
+        lvl, ttl = __md_heading_info(ln)
+        candidate = ttl if ttl else ln
+        if _is_duplicate_section_title(candidate):
+            continue
+        out.append(ln)
+    return "\n".join(out)
 
 # =========================
 # Generación del informe
@@ -437,43 +433,44 @@ def generate_report(api_key: str,
     # Principales Hallazgos
     hallazgos_text = full_text[:10000]
     hallazgos = call_gpt(api_key, PROMPT_HALLAZGOS, hallazgos_text, 700)
+    # Limpia encabezados duplicados dentro del texto generado
+    hallazgos = _strip_duplicate_heading_lines(hallazgos)
     doc_out.add_paragraph("Principales Hallazgos", style="Heading 1")
     for item in hallazgos.split("\n"):
         t = item.strip()
         if not t:
             continue
-        # usar el nuevo formateo con verbatim centrado
         format_text_block(doc_out, t, color=REPORT_COLOR)
 
-    # Cuerpo formateado (evita duplicar títulos de secciones ya agregadas)
+    # Cuerpo formateado (evita duplicar títulos ya agregados)
     for i, para in enumerate(paragraphs):
-        t = para.strip()
+        raw = para
+        t = raw.strip()
         if not t:
             continue
 
-        # Evita duplicar "Resumen Ejecutivo" / "Principales Hallazgos"
-        if re.match(r"^\s*#{1,6}\s+", t) and _is_duplicate_section_title(t):
+        # 1) Si la línea (con o sin ###/negritas) normalizada coincide con título duplicado, se omite
+        if _is_duplicate_section_title(t):
             continue
-        if _is_duplicate_section_title(t.strip("*_ :")):
+
+        # 2) Si es un encabezado Markdown, manejarlo robustamente
+        lvl, ttl = __md_heading_info(t)
+        if lvl is not None:
+            if _is_duplicate_section_title(ttl or ""):
+                continue
+            if lvl == 3:  # equivalente al antiguo "### "
+                insert_contraportada_body(doc_out, contraportada_path)
+                doc_out.add_paragraph(ttl, style="Heading 1")
+            elif lvl == 4:
+                doc_out.add_paragraph(ttl, style="Heading 2")
+            else:
+                # Otros niveles: mapear de forma suave
+                style = "Heading 3" if lvl == 5 else "Heading 4"
+                doc_out.add_paragraph(ttl, style=style)
             continue
 
         prev = paragraphs[i-1] if i > 0 else ""
         nxt  = paragraphs[i+1] if i < len(paragraphs)-1 else ""
-
-        if t.startswith("### "):
-            posible_titulo = t[4:].strip()
-            if _is_duplicate_section_title(posible_titulo):
-                continue
-            insert_contraportada_body(doc_out, contraportada_path)
-            doc_out.add_paragraph(posible_titulo, style="Heading 1")
-            continue
-
-        if t.startswith("#### "):
-            posible_titulo = t[5:].strip()
-            if _is_duplicate_section_title(posible_titulo):
-                continue
-            doc_out.add_paragraph(posible_titulo, style="Heading 2")
-            continue
 
         if is_title3(prev, t, nxt):
             posible_titulo = t.strip("*").strip()
@@ -489,7 +486,7 @@ def generate_report(api_key: str,
             doc_out.add_paragraph(posible_titulo, style="Heading 4")
             continue
 
-        # Párrafos normales + verbatims centrados
+        # Párrafos normales + verbatims
         format_text_block(doc_out, t, color=REPORT_COLOR)
 
     insert_footer_logo(doc_out, logo_path)
@@ -510,7 +507,6 @@ async def generate_report_link(
     contraportada: UploadFile | None = File(None),
     logo: UploadFile | None = File(None),
 ):
-    """Genera un informe y devuelve un link temporal para descargar"""
     if not openai_api_key:
         raise HTTPException(status_code=400, detail="openai_api_key es requerida")
     if not file.filename.lower().endswith(".docx"):
@@ -545,7 +541,6 @@ async def generate_report_simple_link(
     file: UploadFile = File(..., description="Archivo .docx base"),
     openai_api_key: str = Form(..., description="Tu OpenAI API Key"),
 ):
-    """Versión simplificada: usa portadas/logos por defecto"""
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
 
@@ -570,7 +565,6 @@ async def generate_report_simple_link(
 
 @app.get("/download/{token}")
 def download_token(token: str):
-    """Entrega el archivo asociado a un token válido"""
     cleanup_downloads()
     item = DOWNLOADS.get(token)
     if not item:
@@ -592,5 +586,3 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
-
-
