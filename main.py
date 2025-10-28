@@ -193,6 +193,10 @@ def modify_style(doc: Document, style_name: str, size_pt: int,
     font.italic = italic
     if color:
         font.color.rgb = color
+    # Asegurar espaciado 0 en todos los estilos usados
+    pf = doc.styles[style_name].paragraph_format
+    pf.space_before = Pt(0)
+    pf.space_after = Pt(0)
 
 def insert_cover_page(doc_out: Document, portada_path) -> None:
     sec0 = doc_out.sections[0]
@@ -296,46 +300,72 @@ def extract_title5_text(line: str) -> str:
     m = re.search(r"\*\*(.*?)\*\*", line)
     return m.group(1).strip(": ") if m else ""
 
-# ========= NUEVO: verbatim centrado con saltos =========
+# ========= Verbátims centrados con un solo salto =========
 def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -> None:
+    def _last_is_blank() -> bool:
+        return bool(doc.paragraphs) and doc.paragraphs[-1].text.strip() == ""
+
+    def _add_blank_once():
+        if not _last_is_blank():
+            bp = doc.add_paragraph("")
+            pf = bp.paragraph_format
+            pf.space_before = Pt(0)
+            pf.space_after = Pt(0)
+
     tokens = re.split(r'(\*\*[^*]+\*\*|_[^_]+_|[*][^*]+[*]|_"[^"]+"_)', texto)
-    p = None
+    p = None  # párrafo corriente (Normal, justificado)
 
     def ensure_p():
         nonlocal p
         if p is None:
             p = doc.add_paragraph("", style="Normal")
             p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+            pf = p.paragraph_format
+            pf.space_before = Pt(0)
+            pf.space_after = Pt(0)
         return p
 
     for token in tokens:
         if not token:
             continue
+
+        # Verbatim: _" ... "_
         if token.startswith('_"') and token.endswith('"_'):
-            doc.add_paragraph("")  # línea en blanco antes
+            _add_blank_once()  # un solo salto antes
             vp = doc.add_paragraph("", style="Normal")
             vp.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            vpf = vp.paragraph_format
+            vpf.space_before = Pt(0)
+            vpf.space_after = Pt(0)
             run = vp.add_run(token[2:-2])
             run.bold = True
             run.italic = True
             run.font.color.rgb = color
-            doc.add_paragraph("")  # línea en blanco después
-            p = None
+            _add_blank_once()  # un solo salto después
+            p = None  # reinicia
             continue
+
+        # **negrita**
         if token.startswith("**") and token.endswith("**"):
             run = ensure_p().add_run(token[2:-2])
             run.bold = True
             continue
+
+        # *negrita+itálica* (coloreada)
         if token.startswith("*") and token.endswith("*"):
             run = ensure_p().add_run(token[1:-1])
             run.bold = True
             run.italic = True
             run.font.color.rgb = color
             continue
+
+        # _itálica_
         if token.startswith("_") and token.endswith("_"):
             run = ensure_p().add_run(token[1:-1])
             run.italic = True
             continue
+
+        # Texto plano
         ensure_p().add_run(token)
 
 # ====== Helpers para evitar duplicados de títulos ======
@@ -343,14 +373,13 @@ _NBSP = "\u00A0"
 _ZWSP = "\u200B"
 
 def _normalize_ws(s: str) -> str:
-    # Reemplaza NBSP y ZWSP por espacio normal y colapsa espacios
     s = s.replace(_NBSP, " ").replace(_ZWSP, "")
     return re.sub(r"\s+", " ", s, flags=re.UNICODE).strip()
 
 def _normalize_title(s: str) -> str:
     s = _normalize_ws(s)
-    s = re.sub(r"^[#\s]+", "", s, flags=re.UNICODE)  # quita # y espacios
-    s = s.strip("*_ :\t-—")  # limpieza ligera
+    s = re.sub(r"^[#\s]+", "", s, flags=re.UNICODE)
+    s = s.strip("*_ :\t-—")
     return s.lower()
 
 def _is_duplicate_section_title(texto: str) -> bool:
@@ -358,10 +387,6 @@ def _is_duplicate_section_title(texto: str) -> bool:
     return norm.startswith("resumen ejecutivo") or norm.startswith("principales hallazgos")
 
 def __md_heading_info(s: str):
-    """
-    Detecta encabezados Markdown con cualquier espacio unicode.
-    Devuelve (level:int|None, title:str|None).
-    """
     s2 = _normalize_ws(s)
     m = re.match(r"^(#{1,6})\s*(.+?)\s*$", s2, flags=re.UNICODE)
     if not m:
@@ -371,7 +396,6 @@ def __md_heading_info(s: str):
     return level, title
 
 def _strip_duplicate_heading_lines(text: str) -> str:
-    # Elimina líneas que sean exactamente el mismo título (con o sin ###)
     lines = text.splitlines()
     out = []
     for ln in lines:
@@ -432,7 +456,6 @@ def generate_report(api_key: str,
     # Principales Hallazgos
     hallazgos_text = full_text[:10000]
     hallazgos = call_gpt(api_key, PROMPT_HALLAZGOS, hallazgos_text, 700)
-    # Limpia encabezados duplicados dentro del texto generado
     hallazgos = _strip_duplicate_heading_lines(hallazgos)
     doc_out.add_paragraph("Principales Hallazgos", style="Heading 1")
     for item in hallazgos.split("\n"):
@@ -448,22 +471,19 @@ def generate_report(api_key: str,
         if not t:
             continue
 
-        # 1) Si la línea (con o sin ###/negritas) normalizada coincide con título duplicado, se omite
         if _is_duplicate_section_title(t):
             continue
 
-        # 2) Si es un encabezado Markdown, manejarlo robustamente
         lvl, ttl = __md_heading_info(t)
         if lvl is not None:
             if _is_duplicate_section_title(ttl or ""):
                 continue
-            if lvl == 3:  # equivalente al antiguo "### "
+            if lvl == 3:
                 insert_contraportada_body(doc_out, contraportada_path)
                 doc_out.add_paragraph(ttl, style="Heading 1")
             elif lvl == 4:
                 doc_out.add_paragraph(ttl, style="Heading 2")
             else:
-                # Otros niveles: mapear de forma suave
                 style = "Heading 3" if lvl == 5 else "Heading 4"
                 doc_out.add_paragraph(ttl, style=style)
             continue
@@ -485,7 +505,7 @@ def generate_report(api_key: str,
             doc_out.add_paragraph(posible_titulo, style="Heading 4")
             continue
 
-        # Párrafos normales + verbatims
+        # Párrafos normales + verbátims
         format_text_block(doc_out, t, color=REPORT_COLOR)
 
     insert_footer_logo(doc_out, logo_path)
@@ -585,4 +605,3 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
-
