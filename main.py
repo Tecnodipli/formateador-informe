@@ -21,7 +21,7 @@ from openai import OpenAI
 from PIL import Image
 
 # =========================
-# Configuración de logs
+# Logs
 # =========================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(levelname)s — %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ REPORT_COLOR   = RGBColor(133, 78, 197)
 HEADING_COLOR  = RGBColor(85, 54, 185)
 
 # =========================
-# Assets predeterminados
+# Assets
 # =========================
 ASSETS_DIR = "assets"
 DEFAULT_PORTADA_PATH       = os.path.join(ASSETS_DIR, "portada.png")
@@ -51,7 +51,6 @@ ALLOWED_ORIGINS = [
     "https://www.dipli.ai/preparaci%C3%B3n",
     "https://www-dipli-ai.filesusr.com",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -62,7 +61,7 @@ app.add_middleware(
 )
 
 # =========================
-# Descargas temporales en memoria
+# Descargas temporales
 # =========================
 DOWNLOADS: dict[str, tuple[bytes, str, str, datetime]] = {}
 DOWNLOAD_TTL_SECS = 900  # 15 min
@@ -103,20 +102,19 @@ def ensure_default_assets() -> None:
 ensure_default_assets()
 
 # =========================
-# Configuración GPT
+# OpenAI helpers
 # =========================
 USE_TIKTOKEN = False
 MODEL_MAX_TOKENS = 8192
-
 try:
     import tiktoken
     ENCODING = tiktoken.encoding_for_model("gpt-4")
     USE_TIKTOKEN = True
 except Exception:
-    pass
+    ENCODING = None
 
 def trim_to_fit(text: str, reserved_output: int = 700) -> str:
-    if USE_TIKTOKEN:
+    if USE_TIKTOKEN and ENCODING:
         tokens = ENCODING.encode(text)
         max_input = max(MODEL_MAX_TOKENS - reserved_output - 100, 0)
         return ENCODING.decode(tokens[: max_input])
@@ -125,11 +123,17 @@ def trim_to_fit(text: str, reserved_output: int = 700) -> str:
     return text[: max_input_tokens * approx_chars_per_token]
 
 def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) -> str:
-    if not api_key:
-        raise ValueError("API Key de OpenAI es requerida")
-    client = OpenAI(api_key=api_key)
-    trimmed_input = trim_to_fit(user_input, reserved_output=max_tokens)
+    """
+    Devuelve texto del modelo o "" si:
+    - no hay API key
+    - falla la request
+    """
+    if not api_key or not api_key.strip():
+        logger.info("OpenAI API key ausente -> se omite generación.")
+        return ""
     try:
+        client = OpenAI(api_key=api_key.strip())
+        trimmed_input = trim_to_fit(user_input, reserved_output=max_tokens)
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -139,23 +143,19 @@ def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) 
             temperature=0.5,
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content.strip()
-    except Exception:
-        return "Contenido no disponible."
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.error(f"Error llamando a OpenAI: {e}")
+        return ""
 
 # =========================
 # Prompts
 # =========================
-PROMPT_RESUMEN = """
-Actúa como un experto en redacción ejecutiva y análisis de informes cualitativos. Tu tarea es redactar un resumen ejecutivo profesional y conciso, basándote en el siguiente contenido del informe.
-"""
-
-PROMPT_HALLAZGOS = """
-Actúa como un experto en redacción ejecutiva y análisis cualitativo. A partir del siguiente documento, redacta una sección titulada "Principales Hallazgos" en español.
-"""
+PROMPT_RESUMEN = "Redacta un resumen ejecutivo profesional y conciso del documento."
+PROMPT_HALLAZGOS = "Redacta una sección titulada 'Principales Hallazgos' con viñetas claras, sin repetir el título."
 
 # =========================
-# Formateo
+# Formato y helpers DOCX
 # =========================
 def modify_style(doc: Document, style_name: str, size_pt: int,
                  bold: bool = False, italic: bool = False,
@@ -224,99 +224,71 @@ def insert_footer_logo(doc: Document, logo_source) -> None:
     except Exception as e:
         logger.error(f"Error footer logo: {e}")
 
-# ========= Verbátims centrados =========
+# ====== verbatims centrados (_"..."_ y *"..."*) ======
 def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -> None:
     def _last_is_blank() -> bool:
         return bool(doc.paragraphs) and doc.paragraphs[-1].text.strip() == ""
-
     def _add_blank_once():
         if not _last_is_blank():
             bp = doc.add_paragraph("")
             pf = bp.paragraph_format
-            pf.space_before = Pt(0)
-            pf.space_after = Pt(0)
+            pf.space_before = Pt(0); pf.space_after = Pt(0)
 
-    tokens = re.split(
-        r'(\*\*[^*]+\*\*|_"[^"]+"_|\*"[^"]+"\*|_[^_]+_|[*][^*]+[*])',
-        texto
-    )
-
+    tokens = re.split(r'(\*\*[^*]+\*\*|_"[^"]+"_|\*"[^"]+"\*|_[^_]+_|[*][^*]+[*])', texto)
     p = None
-
     def ensure_p():
         nonlocal p
         if p is None:
             p = doc.add_paragraph("", style="Normal")
             p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
             pf = p.paragraph_format
-            pf.space_before = Pt(0)
-            pf.space_after = Pt(0)
+            pf.space_before = Pt(0); pf.space_after = Pt(0)
         return p
 
     for token in tokens:
         if not token:
             continue
-
-        # _"verbatim"_
+        # _"..."_
         if token.startswith('_"') and token.endswith('"_'):
             _add_blank_once()
             vp = doc.add_paragraph("", style="Normal")
             vp.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-            run = vp.add_run(token[2:-2])
-            run.bold = True
-            run.italic = True
-            run.font.color.rgb = color
-            _add_blank_once()
-            p = None
-            continue
-
-        # *"verbatim"*
+            vpf = vp.paragraph_format
+            vpf.space_before = Pt(0); vpf.space_after = Pt(0)
+            run = vp.add_run(token[2:-2]); run.bold = True; run.italic = True; run.font.color.rgb = color
+            _add_blank_once(); p = None; continue
+        # *"..."*
         if token.startswith('*"') and token.endswith('"*'):
             _add_blank_once()
             vp = doc.add_paragraph("", style="Normal")
             vp.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-            run = vp.add_run(token[2:-2])
-            run.bold = True
-            run.italic = True
-            run.font.color.rgb = color
-            _add_blank_once()
-            p = None
-            continue
-
+            vpf = vp.paragraph_format
+            vpf.space_before = Pt(0); vpf.space_after = Pt(0)
+            run = vp.add_run(token[2:-2]); run.bold = True; run.italic = True; run.font.color.rgb = color
+            _add_blank_once(); p = None; continue
         # **negrita**
         if token.startswith("**") and token.endswith("**"):
-            run = ensure_p().add_run(token[2:-2])
-            run.bold = True
-            continue
-
+            r = ensure_p().add_run(token[2:-2]); r.bold = True; continue
         # _itálica_
         if token.startswith("_") and token.endswith("_"):
-            run = ensure_p().add_run(token[1:-1])
-            run.italic = True
-            continue
-
-        # *negrita+itálica* coloreada
+            r = ensure_p().add_run(token[1:-1]); r.italic = True; continue
+        # *negrita+itálica* (coloreada)
         if token.startswith("*") and token.endswith("*"):
-            run = ensure_p().add_run(token[1:-1])
-            run.bold = True
-            run.italic = True
-            run.font.color.rgb = color
-            continue
-
+            r = ensure_p().add_run(token[1:-1]); r.bold = True; r.italic = True; r.font.color.rgb = color; continue
+        # texto plano
         ensure_p().add_run(token)
 
-# ====== Helpers títulos duplicados ======
+# ====== títulos duplicados ======
 def _normalize_title(s: str) -> str:
     s = re.sub(r"^[#\s]+", "", s)
     s = s.strip("*_ :\t-—").lower()
     return s
-
 def _is_duplicate_section_title(texto: str) -> bool:
     norm = _normalize_title(texto)
     return norm.startswith("resumen ejecutivo") or norm.startswith("principales hallazgos")
 
 # =========================
-# Generación informe
+# Generación de informe
 # =========================
 def generate_report(api_key: str,
                     input_doc_bytes: bytes,
@@ -330,13 +302,12 @@ def generate_report(api_key: str,
     full_text  = "\n\n".join(paragraphs)
 
     if use_defaults:
-        with open(DEFAULT_PORTADA_PATH, "rb") as f:
-            portada_path = BytesIO(f.read())
-        with open(DEFAULT_CONTRAPORTADA_PATH, "rb") as f:
-            contraportada_path = BytesIO(f.read())
-        with open(DEFAULT_LOGO_PATH, "rb") as f:
-            logo_path = BytesIO(f.read())
+        with open(DEFAULT_PORTADA_PATH, "rb") as f: portada_path = BytesIO(f.read())
+        with open(DEFAULT_CONTRAPORTADA_PATH, "rb") as f: contraportada_path = BytesIO(f.read())
+        with open(DEFAULT_LOGO_PATH, "rb") as f: logo_path = BytesIO(f.read())
     else:
+        if not (portada_bytes and contraportada_bytes and logo_bytes):
+            raise ValueError("Faltan imágenes personalizadas (portada/contraportada/logo).")
         portada_path       = BytesIO(portada_bytes)
         contraportada_path = BytesIO(contraportada_bytes)
         logo_path          = BytesIO(logo_bytes)
@@ -351,17 +322,22 @@ def generate_report(api_key: str,
     modify_style(doc_out, 'Heading 4', 12, bold=True,  color=HEADING_COLOR)
     modify_style(doc_out, 'Heading 5', 20, bold=True,  color=REPORT_COLOR)
 
+    # Resumen (si hay key; si no, queda vacío y no rompe)
     resumen = call_gpt(api_key, PROMPT_RESUMEN, full_text[:10000], 500)
-    doc_out.add_paragraph("Resumen Ejecutivo", style="Heading 1")
-    doc_out.add_paragraph(resumen, style="Normal")
+    if resumen:
+        doc_out.add_paragraph("Resumen Ejecutivo", style="Heading 1")
+        doc_out.add_paragraph(resumen, style="Normal")
 
+    # Hallazgos (idem)
     hallazgos = call_gpt(api_key, PROMPT_HALLAZGOS, full_text[:10000], 700)
-    doc_out.add_paragraph("Principales Hallazgos", style="Heading 1")
-    for line in hallazgos.split("\n"):
-        if not line.strip():
-            continue
-        format_text_block(doc_out, line.strip(), color=REPORT_COLOR)
+    if hallazgos:
+        doc_out.add_paragraph("Principales Hallazgos", style="Heading 1")
+        for line in hallazgos.split("\n"):
+            if not line.strip():
+                continue
+            format_text_block(doc_out, line.strip(), color=REPORT_COLOR)
 
+    # Cuerpo original (evita títulos duplicados)
     for para in paragraphs:
         t = para.strip()
         if not t or _is_duplicate_section_title(t):
@@ -380,34 +356,48 @@ def generate_report(api_key: str,
 async def generate_report_link(
     request: Request,
     file: UploadFile = File(...),
-    openai_api_key: str = Form(...),
+    openai_api_key: str = Form(""),  # <- ahora es opcional/puede venir vacío
     usar_personalizadas: bool = Form(False),
     portada: UploadFile | None = File(None),
     contraportada: UploadFile | None = File(None),
     logo: UploadFile | None = File(None),
 ):
-    base_bytes = await file.read()
-    portada_bytes = await portada.read() if portada else None
-    contraportada_bytes = await contraportada.read() if contraportada else None
-    logo_bytes = await logo.read() if logo else None
+    try:
+        if not file.filename.lower().endswith(".docx"):
+            raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
+        base_bytes = await file.read()
+        portada_bytes = await portada.read() if (portada and usar_personalizadas) else None
+        contraportada_bytes = await contraportada.read() if (contraportada and usar_personalizadas) else None
+        logo_bytes = await logo.read() if (logo and usar_personalizadas) else None
 
-    result = generate_report(openai_api_key, base_bytes, portada_bytes, contraportada_bytes, logo_bytes, not usar_personalizadas, file.filename)
-    token = register_download(result, file.filename.replace(".docx", "_INFORME_FINAL.docx"), DOCX_MEDIA_TYPE)
-    return {"download_url": f"{request.base_url}download/{token}"}
+        result = generate_report(
+            openai_api_key, base_bytes,
+            portada_bytes, contraportada_bytes, logo_bytes,
+            use_defaults=not usar_personalizadas,
+            filename_hint=file.filename
+        )
+        token = register_download(result, file.filename.replace(".docx", "_INFORME_FINAL.docx"), DOCX_MEDIA_TYPE)
+        base_url = str(request.base_url).rstrip("/")
+        return {"download_url": f"{base_url}/download/{token}", "expires_in_seconds": DOWNLOAD_TTL_SECS}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Fallo en /generate-report-link")
+        raise HTTPException(status_code=500, detail=f"Error al generar el informe: {e}")
 
 @app.get("/download/{token}")
 def download_token(token: str):
     cleanup_downloads()
     item = DOWNLOADS.get(token)
     if not item:
-        raise HTTPException(status_code=404, detail="Link expirado")
+        raise HTTPException(status_code=404, detail="Link expirado o inválido")
     data, filename, media_type, exp = item
     if exp <= datetime.utcnow():
         DOWNLOADS.pop(token, None)
         raise HTTPException(status_code=410, detail="Link expirado")
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"}
     return StreamingResponse(io.BytesIO(data), media_type=media_type, headers=headers)
 
-@app.get("/")
-def root():
-    return {"message": "API Dipli generador de informes lista", "status": "ok"}
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
