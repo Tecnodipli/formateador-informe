@@ -38,6 +38,7 @@ DEFAULT_CONTRAPORTADA_PATH = os.path.join(ASSETS_DIR, "contraportada.png")
 DEFAULT_LOGO_PATH          = os.path.join(ASSETS_DIR, "logo.png")
 
 app = FastAPI(title="Formateador de informes")
+
 # =========================
 # CORS: habilitar solo tus dominios
 # =========================
@@ -53,7 +54,7 @@ ALLOWED_ORIGINS = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,   # ✅ ahora sí aplica tu lista
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -170,16 +171,6 @@ Actúa como un experto en redacción ejecutiva y análisis de informes cualitati
 * Contenido: objetivo, alcance, hallazgos, impacto y recomendaciones.
 * Tono: formal, claro y accesible.
 * Evitar: repeticiones, tecnicismos y explicaciones extensas.
-
-"""
-
-PROMPT_ABSTRACT = """
-Traduce y adapta el siguiente resumen ejecutivo del español al inglés, manteniendo la concisión, el tono profesional y la esencia del contenido. Este será el 'Abstract' del documento.
-
-**Requisitos:**
-* Traducción fiel y profesional.
-* Tono: formal, claro y conciso.
-* Evitar: repeticiones e información superflua.
 """
 
 PROMPT_HALLAZGOS = """
@@ -309,23 +300,96 @@ def extract_title5_text(line: str) -> str:
     m = re.search(r"\*\*(.*?)\*\*", line)
     return m.group(1).strip(": ") if m else ""
 
-def format_text(p, texto, color=RGBColor(133, 78, 197)):
-    tokens = re.split(r'(\*\*[^*]+\*\*|_[^_]+_|[*][^*]+[*])', texto)
+# ========= NUEVO: formateo con verbatim centrado y separado =========
+def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -> None:
+    """
+    Emite el 'texto' en el documento:
+    - Texto normal: en el mismo párrafo (justificado).
+    - **negritas**: negrita en línea.
+    - _itálica_: itálica en línea.
+    - *negrita+itálica*: negrita+itálica en línea con color.
+    - _"verbatim"_ : inserta línea en blanco antes, párrafo centrado en morado + itálica + negrita con el contenido,
+      y línea en blanco después. Luego continúa en un nuevo párrafo justificado.
+    """
+    # Captura también el patrón _" ... "_ como token independiente
+    tokens = re.split(r'(\*\*[^*]+\*\*|_[^_]+_|[*][^*]+[*]|_"[^"]+"_)', texto)
+    p = None  # párrafo actual (Normal, justificado)
+
+    def ensure_p():
+        nonlocal p
+        if p is None:
+            p = doc.add_paragraph("", style="Normal")
+            p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+        return p
+
     for token in tokens:
-        if (token.startswith("**") and token.endswith("**")) or (token.startswith('"') and token.endswith('"')):
-            run = p.add_run(token[2:-2])
-            run.bold = True
-        elif (token.startswith("*") and token.endswith("*")) or (token.startswith('_"') and token.endswith('"_')):
-            run = p.add_run(token[1:-1])
+        if token is None or token == "":
+            continue
+
+        # Verbatim: _" ... "_
+        if token.startswith('_"') and token.endswith('"_'):
+            # Línea en blanco antes
+            doc.add_paragraph("")
+            # Párrafo centrado con el contenido del verbatim
+            vp = doc.add_paragraph("", style="Normal")
+            vp.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            run = vp.add_run(token[2:-2])
             run.bold = True
             run.italic = True
             run.font.color.rgb = color
-        elif token.startswith("_") and token.endswith("_"):
-            run = p.add_run(token[1:-1])
-            run.italic = True
-        else:
-            p.add_run(token)
+            # Línea en blanco después
+            doc.add_paragraph("")
+            # Reinicia el párrafo corriente para lo que siga
+            p = None
+            continue
 
+        # **negrita**
+        if token.startswith("**") and token.endswith("**"):
+            run = ensure_p().add_run(token[2:-2])
+            run.bold = True
+            continue
+
+        # *negrita+itálica*  (y lo dejamos también con color como venías usando)
+        if token.startswith("*") and token.endswith("*"):
+            run = ensure_p().add_run(token[1:-1])
+            run.bold = True
+            run.italic = True
+            run.font.color.rgb = color
+            continue
+
+        # _itálica_
+        if token.startswith("_") and token.endswith("_"):
+            run = ensure_p().add_run(token[1:-1])
+            run.italic = True
+            continue
+
+        # Texto plano
+        ensure_p().add_run(token)
+
+# ====== Helpers para evitar duplicados de títulos ======
+def _normalize_title(s: str) -> str:
+    """Normaliza el texto de un posible título para compararlo."""
+    s = s.strip()
+    s = re.sub(r"^[#\s]+", "", s)        # quita numerales al inicio
+    s = s.strip("*_ :\t")                # quita **, __, :, espacios
+    return s.lower()
+
+def _is_duplicate_section_title(texto: str) -> bool:
+    """
+    True si el párrafo es un título (con numerales o formateado)
+    que coincide con los que YA agregamos por código.
+    """
+    norm = _normalize_title(texto)
+    return (
+        norm.startswith("resumen ejecutivo")
+        or norm.startswith("principales hallazgos")
+        # Agrega "abstract" aquí si quisieras filtrarlo en documentos viejos:
+        # or norm.startswith("abstract")
+    )
+
+# =========================
+# Generación del informe
+# =========================
 def generate_report(api_key: str,
                     input_doc_bytes: bytes,
                     portada_bytes: Optional[bytes],
@@ -361,17 +425,16 @@ def generate_report(api_key: str,
     modify_style(doc_out, 'Heading 4', 12, bold=True,  color=HEADING_COLOR)
     modify_style(doc_out, 'Heading 5', 20, bold=True,  color=REPORT_COLOR)
 
+    # TOC
     doc_out.add_paragraph("Tabla de contenidos", style="Heading 5")
     add_table_of_contents(doc_out.add_paragraph())
 
+    # Resumen Ejecutivo
     resumen = call_gpt(api_key, PROMPT_RESUMEN, full_text[:10000], 500)
     doc_out.add_paragraph("Resumen Ejecutivo", style="Heading 1")
     doc_out.add_paragraph(resumen, style="Normal")
 
-    abstract = call_gpt(api_key, PROMPT_ABSTRACT, resumen, 300)
-    doc_out.add_paragraph("Abstract", style="Heading 1")
-    doc_out.add_paragraph(abstract, style="Normal")
-
+    # Principales Hallazgos
     hallazgos_text = full_text[:10000]
     hallazgos = call_gpt(api_key, PROMPT_HALLAZGOS, hallazgos_text, 700)
     doc_out.add_paragraph("Principales Hallazgos", style="Heading 1")
@@ -379,35 +442,55 @@ def generate_report(api_key: str,
         t = item.strip()
         if not t:
             continue
-        p = doc_out.add_paragraph("", style="Normal")
-        p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-        format_text(p, t, color=REPORT_COLOR)
+        # usar el nuevo formateo con verbatim centrado
+        format_text_block(doc_out, t, color=REPORT_COLOR)
 
+    # Cuerpo formateado (evita duplicar títulos de secciones ya agregadas)
     for i, para in enumerate(paragraphs):
         t = para.strip()
         if not t:
+            continue
+
+        # Evita duplicar "Resumen Ejecutivo" / "Principales Hallazgos"
+        if re.match(r"^\s*#{1,6}\s+", t) and _is_duplicate_section_title(t):
+            continue
+        if _is_duplicate_section_title(t.strip("*_ :")):
             continue
 
         prev = paragraphs[i-1] if i > 0 else ""
         nxt  = paragraphs[i+1] if i < len(paragraphs)-1 else ""
 
         if t.startswith("### "):
+            posible_titulo = t[4:].strip()
+            if _is_duplicate_section_title(posible_titulo):
+                continue
             insert_contraportada_body(doc_out, contraportada_path)
-            doc_out.add_paragraph(t[4:].strip(), style="Heading 1")
-            continue
-        if t.startswith("#### "):
-            doc_out.add_paragraph(t[5:].strip(), style="Heading 2")
-            continue
-        if is_title3(prev, t, nxt):
-            doc_out.add_paragraph(t.strip("*"), style="Heading 3")
-            continue
-        if is_title5(t):
-            doc_out.add_paragraph(extract_title5_text(t), style="Heading 4")
+            doc_out.add_paragraph(posible_titulo, style="Heading 1")
             continue
 
-        p = doc_out.add_paragraph("", style="Normal")
-        p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
-        format_text(p, t)
+        if t.startswith("#### "):
+            posible_titulo = t[5:].strip()
+            if _is_duplicate_section_title(posible_titulo):
+                continue
+            doc_out.add_paragraph(posible_titulo, style="Heading 2")
+            continue
+
+        if is_title3(prev, t, nxt):
+            posible_titulo = t.strip("*").strip()
+            if _is_duplicate_section_title(posible_titulo):
+                continue
+            doc_out.add_paragraph(posible_titulo, style="Heading 3")
+            continue
+
+        if is_title5(t):
+            posible_titulo = extract_title5_text(t)
+            if _is_duplicate_section_title(posible_titulo):
+                continue
+            doc_out.add_paragraph(posible_titulo, style="Heading 4")
+            continue
+
+        # Párrafos normales + verbatims centrados
+        format_text_block(doc_out, t, color=REPORT_COLOR)
 
     insert_footer_logo(doc_out, logo_path)
 
@@ -509,10 +592,5 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
-
-
-
-
-
 
 
