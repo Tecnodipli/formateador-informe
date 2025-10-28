@@ -1,5 +1,4 @@
-
-          import os
+import os
 import io
 import re
 import logging
@@ -586,3 +585,4 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "message": "API funcionando correctamente"}
+
