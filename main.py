@@ -3,7 +3,7 @@ import io
 import re
 import logging
 from io import BytesIO
-from typing import Optional
+from typing import Optional, Tuple
 from datetime import datetime, timedelta
 import secrets
 
@@ -155,7 +155,7 @@ PROMPT_RESUMEN = "Redacta un resumen ejecutivo profesional y conciso del documen
 PROMPT_HALLAZGOS = "Redacta una sección titulada 'Principales Hallazgos' con viñetas claras, sin repetir el título."
 
 # =========================
-# Formato y helpers DOCX
+# Helpers DOCX (estilos, portada, etc.)
 # =========================
 def modify_style(doc: Document, style_name: str, size_pt: int,
                  bold: bool = False, italic: bool = False,
@@ -169,7 +169,7 @@ def modify_style(doc: Document, style_name: str, size_pt: int,
         font.color.rgb = color
     pf = doc.styles[style_name].paragraph_format
     pf.space_before = Pt(0)
-    pf.space_after = Pt(0)
+    pf.space_after  = Pt(0)
 
 def insert_cover_page(doc_out: Document, portada_path) -> None:
     sec0 = doc_out.sections[0]
@@ -280,12 +280,28 @@ def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -
 
 # ====== títulos duplicados ======
 def _normalize_title(s: str) -> str:
-    s = re.sub(r"^[#\s]+", "", s)
+    s = re.sub(r"^[#\s]+", "", s.replace("\xa0", " "))
     s = s.strip("*_ :\t-—").lower()
     return s
 def _is_duplicate_section_title(texto: str) -> bool:
     norm = _normalize_title(texto)
     return norm.startswith("resumen ejecutivo") or norm.startswith("principales hallazgos")
+
+# ====== detección robusta de headings estilo Markdown ======
+def parse_hash_heading(raw: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Devuelve (level, title) si el párrafo es '### Título', '####   Título', etc.
+    Tolera NBSP (\xa0) y espacios múltiples. Solo reconoce 3 o más '#'.
+    """
+    if not raw:
+        return None, None
+    s = raw.replace("\xa0", " ").lstrip()
+    m = re.match(r'^(#{3,})\s+(.*\S)\s*$', s)
+    if not m:
+        return None, None
+    level = len(m.group(1))
+    title = m.group(2).strip()
+    return level, title
 
 # =========================
 # Generación de informe
@@ -301,16 +317,24 @@ def generate_report(api_key: str,
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     full_text  = "\n\n".join(paragraphs)
 
+    # Selección de assets con fallback por-asset
     if use_defaults:
         with open(DEFAULT_PORTADA_PATH, "rb") as f: portada_path = BytesIO(f.read())
         with open(DEFAULT_CONTRAPORTADA_PATH, "rb") as f: contraportada_path = BytesIO(f.read())
         with open(DEFAULT_LOGO_PATH, "rb") as f: logo_path = BytesIO(f.read())
     else:
-        if not (portada_bytes and contraportada_bytes and logo_bytes):
-            raise ValueError("Faltan imágenes personalizadas (portada/contraportada/logo).")
-        portada_path       = BytesIO(portada_bytes)
-        contraportada_path = BytesIO(contraportada_bytes)
-        logo_path          = BytesIO(logo_bytes)
+        if portada_bytes:
+            portada_path = BytesIO(portada_bytes)
+        else:
+            with open(DEFAULT_PORTADA_PATH, "rb") as f: portada_path = BytesIO(f.read())
+        if contraportada_bytes:
+            contraportada_path = BytesIO(contraportada_bytes)
+        else:
+            with open(DEFAULT_CONTRAPORTADA_PATH, "rb") as f: contraportada_path = BytesIO(f.read())
+        if logo_bytes:
+            logo_path = BytesIO(logo_bytes)
+        else:
+            with open(DEFAULT_LOGO_PATH, "rb") as f: logo_path = BytesIO(f.read())
 
     doc_out = Document()
     insert_cover_page(doc_out, portada_path)
@@ -322,26 +346,43 @@ def generate_report(api_key: str,
     modify_style(doc_out, 'Heading 4', 12, bold=True,  color=HEADING_COLOR)
     modify_style(doc_out, 'Heading 5', 20, bold=True,  color=REPORT_COLOR)
 
-    # Resumen (si hay key; si no, queda vacío y no rompe)
+    # Resumen (opcional)
     resumen = call_gpt(api_key, PROMPT_RESUMEN, full_text[:10000], 500)
     if resumen:
         doc_out.add_paragraph("Resumen Ejecutivo", style="Heading 1")
         doc_out.add_paragraph(resumen, style="Normal")
 
-    # Hallazgos (idem)
+    # Hallazgos (opcional)
     hallazgos = call_gpt(api_key, PROMPT_HALLAZGOS, full_text[:10000], 700)
     if hallazgos:
         doc_out.add_paragraph("Principales Hallazgos", style="Heading 1")
         for line in hallazgos.split("\n"):
-            if not line.strip():
+            t = line.strip()
+            if not t or _is_duplicate_section_title(t):
                 continue
-            format_text_block(doc_out, line.strip(), color=REPORT_COLOR)
+            format_text_block(doc_out, t, color=REPORT_COLOR)
 
-    # Cuerpo original (evita títulos duplicados)
+    # Cuerpo original (con detección robusta de headings)
     for para in paragraphs:
         t = para.strip()
         if not t or _is_duplicate_section_title(t):
             continue
+
+        level, title = parse_hash_heading(t)
+        if level:
+            if level == 3:
+                # Capítulo principal: insertar contraportada + Heading 1
+                insert_contraportada_body(doc_out, contraportada_path)
+                doc_out.add_paragraph(title, style="Heading 1")
+            elif level == 4:
+                doc_out.add_paragraph(title, style="Heading 2")
+            elif level == 5:
+                doc_out.add_paragraph(title, style="Heading 3")
+            else:
+                doc_out.add_paragraph(title, style="Heading 4")
+            continue  # no imprimir el texto crudo de "### ..."
+
+        # Contenido normal
         format_text_block(doc_out, t, color=REPORT_COLOR)
 
     insert_footer_logo(doc_out, logo_path)
@@ -355,30 +396,43 @@ def generate_report(api_key: str,
 @app.post("/generate-report-link")
 async def generate_report_link(
     request: Request,
-    file: UploadFile = File(...),
-    openai_api_key: str = Form(""),  # <- ahora es opcional/puede venir vacío
-    usar_personalizadas: bool = Form(False),
+    file: UploadFile = File(..., description="Archivo .docx base"),
+    openai_api_key: str = Form("", description="Tu OpenAI API Key (opcional)"),
+    usar_personalizadas: str = Form("false"),
     portada: UploadFile | None = File(None),
     contraportada: UploadFile | None = File(None),
     logo: UploadFile | None = File(None),
 ):
     try:
+        # normalizar flag a bool (acepta "true", "1", "yes", "on")
+        usar_personalizadas_bool = str(usar_personalizadas).strip().lower() in ("true", "1", "yes", "on")
+
         if not file.filename.lower().endswith(".docx"):
             raise HTTPException(status_code=400, detail="Debes subir un archivo .docx válido.")
+
         base_bytes = await file.read()
-        portada_bytes = await portada.read() if (portada and usar_personalizadas) else None
-        contraportada_bytes = await contraportada.read() if (contraportada and usar_personalizadas) else None
-        logo_bytes = await logo.read() if (logo and usar_personalizadas) else None
+
+        # Leer bytes si vienen (y si el switch está activo)
+        portada_bytes = await portada.read() if (usar_personalizadas_bool and portada is not None and hasattr(portada, "read")) else None
+        contraportada_bytes = await contraportada.read() if (usar_personalizadas_bool and contraportada is not None and hasattr(contraportada, "read")) else None
+        logo_bytes = await logo.read() if (usar_personalizadas_bool and logo is not None and hasattr(logo, "read")) else None
 
         result = generate_report(
-            openai_api_key, base_bytes,
-            portada_bytes, contraportada_bytes, logo_bytes,
-            use_defaults=not usar_personalizadas,
-            filename_hint=file.filename
+            api_key=openai_api_key,
+            input_doc_bytes=base_bytes,
+            portada_bytes=portada_bytes,              # puede ser None
+            contraportada_bytes=contraportada_bytes,  # puede ser None
+            logo_bytes=logo_bytes,                    # puede ser None
+            use_defaults=not usar_personalizadas_bool,  # si el switch está apagado, forzar defaults
+            filename_hint=file.filename,
         )
-        token = register_download(result, file.filename.replace(".docx", "_INFORME_FINAL.docx"), DOCX_MEDIA_TYPE)
+
+        final_name = file.filename.replace(".docx", "") + "_INFORME_FINAL.docx"
+        token = register_download(result, final_name, DOCX_MEDIA_TYPE)
+
         base_url = str(request.base_url).rstrip("/")
         return {"download_url": f"{base_url}/download/{token}", "expires_in_seconds": DOWNLOAD_TTL_SECS}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -398,6 +452,10 @@ def download_token(token: str):
     headers = {"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"}
     return StreamingResponse(io.BytesIO(data), media_type=media_type, headers=headers)
 
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "dipli-docx-generator"}
+
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "message": "API funcionando correctamente"}
