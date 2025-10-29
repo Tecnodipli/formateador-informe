@@ -147,9 +147,26 @@ def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) 
 # =========================
 # Prompts
 # =========================
-PROMPT_RESUMEN = "Redacta un resumen ejecutivo profesional y conciso del documento."
-PROMPT_HALLAZGOS = "Redacta una sección titulada 'Principales Hallazgos' con viñetas claras, sin repetir el título."
+PROMPT_RESUMEN = """
+Actúa como un experto en redacción ejecutiva y análisis de informes cualitativos. Tu tarea es redactar un resumen ejecutivo profesional y conciso, basándote en el siguiente contenido del informe.
 
+**Requisitos:**
+* Longitud: proporcional al documento original (~3% del total de palabras).
+* Estructura: dos párrafos integrados.
+* Contenido: objetivo, alcance, hallazgos, impacto y recomendaciones.
+* Tono: formal, claro y accesible.
+* Evitar: repeticiones, tecnicismos y explicaciones extensas.
+
+"""
+PROMPT_HALLAZGOS = """
+Actúa como un experto en redacción ejecutiva y análisis cualitativo. A partir del siguiente documento, redacta una sección titulada "Principales Hallazgos" en español.
+
+**Requisitos:**
+* Enfócate en los hallazgos clave y sus implicaciones.
+* Estructura: numeración y contexto breve por punto.
+* Estilo: profesional, claro, útil para tomadores de decisiones.
+* Evitar: recomendaciones, juicios, generalidades o conclusiones.
+"""
 # =========================
 # Márgenes del cuerpo y helper
 # =========================
@@ -245,6 +262,12 @@ def insert_footer_logo(doc: Document, logo_source) -> None:
         p.add_run().add_picture(img, width=Inches(1.5))
     except Exception as e:
         logger.error(f"Error footer logo: {e}")
+
+def add_table_of_contents(paragraph) -> None:
+    fld = OxmlElement('w:fldSimple')
+    fld.set(qn('w:instr'), 'TOC \\o "1-5" \\h \\z \\u')
+    paragraph._p.append(fld)
+
 
 # ====== verbatims centrados (_"..."_ y *"..."*) ======
 def format_text_block(doc: Document, texto: str, color=RGBColor(133, 78, 197)) -> None:
@@ -369,6 +392,9 @@ def generate_report(api_key: str,
     modify_style(doc_out, 'Heading 4', 12, bold=True,  color=HEADING_COLOR)
     modify_style(doc_out, 'Heading 5', 20, bold=True,  color=REPORT_COLOR)
 
+    doc_out.add_paragraph("Tabla de contenidos", style="Heading 5")
+    add_table_of_contents(doc_out.add_paragraph())
+                        
     # Resumen (opcional)
     resumen = call_gpt(api_key, PROMPT_RESUMEN, full_text[:10000], 500)
     if resumen:
@@ -482,3 +508,4 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "healthy", "message": "API funcionando correctamente"}
+
