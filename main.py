@@ -123,11 +123,7 @@ def trim_to_fit(text: str, reserved_output: int = 700) -> str:
     return text[: max_input_tokens * approx_chars_per_token]
 
 def call_gpt(api_key: str, prompt: str, user_input: str, max_tokens: int = 700) -> str:
-    """
-    Devuelve texto del modelo o "" si:
-    - no hay API key
-    - falla la request
-    """
+    """Devuelve texto del modelo o "" si no hay API key o hay error."""
     if not api_key or not api_key.strip():
         logger.info("OpenAI API key ausente -> se omite generación.")
         return ""
@@ -155,6 +151,20 @@ PROMPT_RESUMEN = "Redacta un resumen ejecutivo profesional y conciso del documen
 PROMPT_HALLAZGOS = "Redacta una sección titulada 'Principales Hallazgos' con viñetas claras, sin repetir el título."
 
 # =========================
+# Márgenes del cuerpo y helper
+# =========================
+BODY_TOP = Cm(2.5)
+BODY_BOTTOM = Cm(2.5)
+BODY_LEFT = Cm(2.5)
+BODY_RIGHT = Cm(2.5)
+
+def set_body_margins(section):
+    section.top_margin = BODY_TOP
+    section.bottom_margin = BODY_BOTTOM
+    section.left_margin = BODY_LEFT
+    section.right_margin = BODY_RIGHT
+
+# =========================
 # Helpers DOCX (estilos, portada, etc.)
 # =========================
 def modify_style(doc: Document, style_name: str, size_pt: int,
@@ -172,9 +182,11 @@ def modify_style(doc: Document, style_name: str, size_pt: int,
     pf.space_after  = Pt(0)
 
 def insert_cover_page(doc_out: Document, portada_path) -> None:
+    # Portada en sección 0 a sangrado 0
     sec0 = doc_out.sections[0]
     sec0.top_margin = sec0.bottom_margin = Cm(0)
     sec0.left_margin = sec0.right_margin = Cm(0)
+
     pw, ph = sec0.page_width, sec0.page_height
     try:
         if isinstance(portada_path, list):
@@ -185,16 +197,22 @@ def insert_cover_page(doc_out: Document, portada_path) -> None:
     except Exception as e:
         logger.error(f"Error portada: {e}")
         return
+
     p = doc_out.add_paragraph()
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     p.add_run().add_picture(img, width=pw, height=ph)
-    doc_out.add_page_break()
+
+    # NUEVA sección de cuerpo con márgenes normales
+    body_sec = doc_out.add_section(WD_SECTION.NEW_PAGE)
+    set_body_margins(body_sec)
 
 def insert_contraportada_body(doc_out: Document, contraportada_path) -> None:
-    sec = doc_out.add_section(WD_SECTION.NEW_PAGE)
-    sec.top_margin = sec.bottom_margin = Cm(0)
-    sec.left_margin = sec.right_margin = Cm(0)
-    pw, ph = sec.page_width, sec.page_height
+    # Sección de contraportada a sangrado 0
+    cover_sec = doc_out.add_section(WD_SECTION.NEW_PAGE)
+    cover_sec.top_margin = cover_sec.bottom_margin = Cm(0)
+    cover_sec.left_margin = cover_sec.right_margin = Cm(0)
+
+    pw, ph = cover_sec.page_width, cover_sec.page_height
     try:
         if isinstance(contraportada_path, str):
             resp = requests.get(contraportada_path, timeout=15)
@@ -204,10 +222,14 @@ def insert_contraportada_body(doc_out: Document, contraportada_path) -> None:
     except Exception as e:
         logger.error(f"Error contraportada: {e}")
         return
+
     p = doc_out.add_paragraph()
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     p.add_run().add_picture(img, width=pw, height=ph)
-    doc_out.add_page_break()
+
+    # NUEVA sección de cuerpo con márgenes normales
+    body_sec = doc_out.add_section(WD_SECTION.NEW_PAGE)
+    set_body_margins(body_sec)
 
 def insert_footer_logo(doc: Document, logo_source) -> None:
     sec = doc.sections[-1]
@@ -337,7 +359,8 @@ def generate_report(api_key: str,
             with open(DEFAULT_LOGO_PATH, "rb") as f: logo_path = BytesIO(f.read())
 
     doc_out = Document()
-    insert_cover_page(doc_out, portada_path)
+    insert_cover_page(doc_out, portada_path)         # crea sección de cuerpo con márgenes
+    set_body_margins(doc_out.sections[-1])           # cinturón y tirantes
 
     modify_style(doc_out, 'Normal',    12)
     modify_style(doc_out, 'Heading 1', 20, bold=True,  color=HEADING_COLOR)
@@ -371,8 +394,8 @@ def generate_report(api_key: str,
         level, title = parse_hash_heading(t)
         if level:
             if level == 3:
-                # Capítulo principal: insertar contraportada + Heading 1
-                insert_contraportada_body(doc_out, contraportada_path)
+                # Capítulo principal: contraportada + Heading 1
+                insert_contraportada_body(doc_out, contraportada_path)  # deja nueva sección con márgenes
                 doc_out.add_paragraph(title, style="Heading 1")
             elif level == 4:
                 doc_out.add_paragraph(title, style="Heading 2")
@@ -380,7 +403,7 @@ def generate_report(api_key: str,
                 doc_out.add_paragraph(title, style="Heading 3")
             else:
                 doc_out.add_paragraph(title, style="Heading 4")
-            continue  # no imprimir el texto crudo de "### ..."
+            continue  # no imprimir "### ..."
 
         # Contenido normal
         format_text_block(doc_out, t, color=REPORT_COLOR)
